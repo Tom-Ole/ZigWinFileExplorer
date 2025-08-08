@@ -47,7 +47,7 @@ const explorer = struct {
         }
     }
 
-    pub fn draw(self: *explorer) void {
+    pub fn draw(self: *explorer) !void {
         c.BeginDrawing();
         c.ClearBackground(c.RAYWHITE);
 
@@ -70,16 +70,11 @@ const explorer = struct {
             const prefix = if (entry.kind == .directory) "[DIR]  " else "[FILE] ";
 
             var display_text_buf: [512]u8 = undefined;
-            const display_text = if (entry.kind == .file and entry.size > 0)
-                std.fmt.bufPrintZ(&display_text_buf, "{s}{s} ({s})", .{ prefix, entry.name, formatFileSize(entry.size) }) catch "Error"
-            else
-                std.fmt.bufPrintZ(&display_text_buf, "{s}{s}", .{ prefix, entry.name }) catch "Error";
+            const display_text = std.fmt.bufPrintZ(&display_text_buf, "{s}{s} ({s})", .{ prefix, entry.name, formatFileSize(entry.size) }) catch "error";
 
             c.DrawText(display_text, 20, y_offset, 16, color);
             y_offset += line_height;
         }
-
-        //c.DrawText("Press ESC to exit", 10, self.window_height - 30, 16, c.DARKGRAY);
 
         c.EndDrawing();
     }
@@ -123,7 +118,6 @@ const explorer = struct {
             const full_path = try std.fs.path.join(self.alloc, &[_][]const u8{ path, entry.name });
             var size: u64 = 0;
 
-            // TODO: Handle size for directories not just files
             if (entry.kind == .file) {
                 if (self.current_dir.?.openFile(entry.name, .{})) |file| {
                     defer file.close();
@@ -135,6 +129,9 @@ const explorer = struct {
                 } else |err| {
                     std.debug.print("Warning: Could not open file {s}: {}\n", .{ entry.name, err });
                 }
+            } else if (entry.kind == .directory) {
+                // TODO: Handle Size for directories fast:
+                size = self.calculateDirSize(entry.name) catch 0;
             }
 
             const dir_entry = DirEntry{
@@ -158,13 +155,91 @@ const explorer = struct {
         return std.mem.lessThan(u8, a.name, b.name);
     }
 
-    // TODO: get right format size output like "1.2 MB", "3.4 GB", etc.
-    // Currently, it just returns "< 1KB", "< 1MB", "<
+    fn calculateDirSize(self: *explorer, dir_name: []const u8) !u64 {
+        var total: u64 = 0;
+
+        if (self.current_dir.?.openDir(dir_name, .{ .iterate = true })) |opened_dir| {
+            var dir = opened_dir;
+            defer dir.close();
+
+            var iterator = dir.iterate();
+            while (try iterator.next()) |entry| {
+                if (entry.kind == .file) {
+                    if (dir.openFile(entry.name, .{})) |file| {
+                        defer file.close();
+                        if (file.stat()) |stat| {
+                            total += stat.size;
+                        } else |_| {
+                            // ignore stat error
+                        }
+                    } else |_| {
+                        // ignore open file error
+                    }
+                } else if (entry.kind == .directory) {
+                    // Recursive breaks the programm so yeah. Dont do it.
+                    //total += self.calculateDirSizeRecursive(&dir, entry.name) catch 0;
+                }
+            }
+        } else |_| {
+            // Cant open the dir
+            return 0;
+        }
+        return total;
+    }
+
+    // Its broken
+    fn calculateDirSizeRecursive(self: *explorer, parent_dir: *std.fs.Dir, dir_name: []const u8) !u64 {
+        var total_size: u64 = 0;
+
+        if (parent_dir.openDir(dir_name, .{ .iterate = true })) |opened_dir| {
+            var dir = opened_dir;
+            defer dir.close();
+
+            var iterator = dir.iterate();
+            while (try iterator.next()) |entry| {
+                if (entry.kind == .file) {
+                    if (dir.openFile(entry.name, .{})) |file| {
+                        defer file.close();
+                        if (file.stat()) |stat| {
+                            total_size += stat.size;
+                        } else |_| {}
+                    } else |_| {}
+                } else if (entry.kind == .directory) {
+                    total_size += self.calculateDirSizeRecursive(&dir, entry.name) catch 0;
+                }
+            }
+        } else |_| {
+            return 0;
+        }
+
+        return total_size;
+    }
+
+    // Format file size in human readable format
     fn formatFileSize(size: u64) []const u8 {
-        if (size < 1024) return "< 1KB";
-        if (size < 1024 * 1024) return "< 1MB";
-        if (size < 1024 * 1024 * 1024) return "< 1GB";
-        return "> 1GB";
+        if (size == 0) return "0 B";
+
+        var s: f64 = @floatFromInt(size);
+        var postfix: []const u8 = "B";
+        var size_format_buf: [64]u8 = undefined;
+
+        if (size >= 1000000000) {
+            s /= 1000000000.0;
+            postfix = "GB";
+        } else if (size >= 1000000) {
+            s /= 1000000.0;
+            postfix = "MB";
+        } else if (size >= 1000) {
+            s /= 1000.0;
+            postfix = "KB";
+        }
+
+        // Use one decimal place for values >= 1000, no decimal for bytes
+        if (size < 1000) {
+            return std.fmt.bufPrint(&size_format_buf, "{d} {s}", .{ @as(u64, @intFromFloat(s)), postfix }) catch "error";
+        } else {
+            return std.fmt.bufPrint(&size_format_buf, "{d:.1} {s}", .{ s, postfix }) catch "error";
+        }
     }
 };
 
@@ -183,7 +258,7 @@ pub fn main() !void {
     try exp.init();
 
     while (!c.WindowShouldClose()) {
-        exp.draw();
+        try exp.draw();
     }
 
     exp.close();
